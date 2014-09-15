@@ -1,84 +1,117 @@
-#include "SD.h"
-#include "TinyGPS++.h"
-#include "SoftwareSerial.h"
-#define BUTTON 7
-#define LED 2
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+#include <SD.h>
 
-File curFile;
-TinyGPSPlus gps;
-int prevButton = 0;
+static const int RXPin = 3, TXPin = 2;
+static const uint32_t GPSBaud = 4800;
+static const int buttonPin = 5;
+int prevButton = HIGH;
+boolean gpsAcquired = false;
 boolean recording = false;
-int counter = 0;
-SoftwareSerial ss(4, 3);
-boolean gpsAquired = false;
+File curFile;
+long lastPoint = 0;
+
+TinyGPSPlus gps;
+
+SoftwareSerial ss(RXPin, TXPin);
 
 void setup()
 {
-  Serial.begin(115200);
+  // Begin GPS serial communications
+  ss.begin(GPSBaud);
+  
+  // Pin setup
   pinMode(10, OUTPUT);
-  pinMode(BUTTON, INPUT);
-  pinMode(LED, OUTPUT);
-  ss.begin(4800);
-  //SD.begin(10);
+  pinMode(buttonPin, INPUT);
+  digitalWrite(buttonPin, HIGH);
+  SD.begin(10);
+  
+  // Wait until GPS satellites acquired
+  while (!gps.date.isValid() || !gps.time.isValid() || !gps.location.isValid() || !gps.altitude.isValid())
+  {
+    // Read in from GPS
+    while (ss.available())
+      gps.encode(ss.read());
+  }
+  
 }
 
 void loop()
 {
-  Serial.println(gpsAquired);
-  /*if (gps.location.age() > 1500) {
-    gpsAquired = false;
-  } else {
-    gpsAquired = true;
-  }*/
-  while (ss.available())
-    gps.encode(ss.read());
-  int buttonState = digitalRead(BUTTON);
+  // Checks time since last reading.  If it is too long, the GPS has lost signal and needs to re-acquire it
+  if (gps.location.age() > 1500)
+  {
+    gpsAcquired = false;
+  }
+  else
+  {
+    gpsAcquired = true;
+  }
+  
+  // Read button state
+  int buttonState = digitalRead(buttonPin);
   boolean pushed = false;
-  if (buttonState == LOW && prevButton != buttonState)
+  if (buttonState == LOW && prevButton == HIGH)
   {
     pushed = true;
   }
   if (pushed)
   {
-    if (recording)
+    if (!recording)
     {
-      curFile.print("  </trkseg>\n"
-                    " </trk>\n"
-                    "</gpx>\n");
-      digitalWrite(LED, LOW);
-      curFile.close();
+      // Begin recording data
+      recording = true;
+      char curYear[5];
+      char path[8];
+      char filename[21];
+      sprintf(curYear, "%d\0", gps.date.year());
+      sprintf(path, "%d/%02d\0", gps.date.year(), gps.date.month());
+      sprintf(filename, "%d/%02d/%02d%02d%02d%02d.gpx\0", gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second());
+      if (!SD.exists(curYear))
+      {
+        SD.mkdir(curYear);
+      }
+      if (!SD.exists(path))
+      {
+        SD.mkdir(path);
+      }
+      if (SD.exists(filename))
+      {
+        SD.remove(filename);
+      }
+      curFile = SD.open(filename, FILE_WRITE);
+      curFile.println("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>");
+      curFile.println("<gpx>");
+      curFile.println(" <metadata>");
+      curFile.print  ("  <time>"); curFile.printf("%4d-%02d-%02dT%02d:%02d:%02dZ", gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second()); curFile.println("</time>");
+      curFile.println(" </metadata>");
+      curFile.println(" <trk>");
+      curFile.print  ("  <name>"); curFile.printf("%4d-%02d-%02dT%02d:%02d:%02dZ", gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second()); curFile.println("</name>");
+      curFile.println("  <trkseg>");
     }
     else
     {
-      String fileName = timeString() + ".gpx";
-      char* fileNameChar;
-      fileName.toCharArray(fileNameChar, fileName.length());
-      curFile = SD.open(fileNameChar, FILE_WRITE);
-      curFile.println("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>");
-      curFile.println("<gpx xmlns=\"http://www.topografix.com/GPX/1/1\" xmlns:gpxx=\"http://www.garmin.com/xmlschemas/GpxExtensions/v3\" xmlns:gpxtpx=\"http://www.garmin.com/xmlschemas/TrackPointExtension/v1\" creator=\"Callum's Super Awesome GPS\" version=\"1.1\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd http://www.garmin.com/xmlschemas/GpxExtensions/v3 http://www.garmin.com/xmlschemas/GpxExtensionsv3.xsd http://www.garmin.com/xmlschemas/TrackPointExtension/v1 http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd\">");
-      curFile.println(" <metadata>");
-      curFile.println("  <time>" + timeString() + "</time>");
-      curFile.println(" </metadata>");
-      curFile.println(" <trk>");
-      curFile.println("  <name>" + timeString() + "</name>");
-      curFile.println("  <trkseg>");
-      digitalWrite(LED, HIGH);
+      // End recording and close file
+      recording = false;
+      curFile.println("  </trkseg>");
+      curFile.println(" </trk>");
+      curFile.println("</gpx>");
+      curFile.close();
     }
+    
   }
-  prevButton = buttonState;
-  if (recording && counter == 5000000 && gpsAquired)
+  
+  if (recording && gpsAcquired && millis() - lastPoint >= 1000)
   {
-    counter = 0;
-    curFile.print("   <trkpt lat=\""); curFile.print(gps.location.lat(), 6); curFile.print("\" lon=\""); curFile.print(gps.location.lng(), 6); curFile.println("\">");
-    curFile.println("    <ele>"); curFile.print(gps.altitude.meters(), 6); curFile.println("</ele>");
-    curFile.println("    <time>" + timeString() + "</time>");
+    lastPoint = millis();
+    curFile.print  ("   <trkpt lat=\""); curFile.print(gps.location.lat(), 7); curFile.print("\" lon=\""); curFile.print(gps.location.lng(), 7); curFile.println("\">");
+    curFile.print  ("    <ele>"); curFile.print(gps.altitude.meters(), 2); curFile.println("</ele>");
+    curFile.print  ("    <time>"); curFile.printf("%4d-%02d-%02dT%02d:%02d:%02dZ", gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second()); curFile.println("</time>");
     curFile.println("   </trkpt>");
   }
-  counter = counter % 5000000;
-  counter++;
-}
-
-String timeString()
-{
-  return (String)(String(gps.date.year()) + "-" + String(gps.date.month()) + "-" + String(gps.date.day()) + "T" + String(gps.time.hour()) + ":" + String(gps.time.minute()) + ":" + String(gps.time.second()) + "Z");
+  
+  while (ss.available())
+    gps.encode(ss.read());
+    
+  prevButton = buttonState;
 }
